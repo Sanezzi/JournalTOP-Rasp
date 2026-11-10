@@ -1,0 +1,89 @@
+x-logs: &logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-database-env: &database-env
+  POSTGRES_DB: "${POSTGRES_DB:-journal_bot}"
+  POSTGRES_USER: "${POSTGRES_USER:-journal_bot}"
+  POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+
+x-app-env: &app-env
+  <<: *database-env
+  OWNER_TELEGRAM_ID: "${OWNER_TELEGRAM_ID:?OWNER_TELEGRAM_ID is required}"
+  ALLOWED_GROUP_IDS: "${ALLOWED_GROUP_IDS:-}"
+  JOURNAL_PROVIDER: "${JOURNAL_PROVIDER:-real}"
+  SCHEDULE_SYNC_INTERVAL_SECONDS: "${SCHEDULE_SYNC_INTERVAL_SECONDS:-3600}"
+  TIMEZONE: "${TIMEZONE:-Asia/Yekaterinburg}"
+  LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+
+x-app: &app
+  build: .
+  image: journal-bot:local
+  init: true
+  logging: *logs
+  security_opt:
+    - no-new-privileges:true
+
+x-worker: &worker
+  <<: *app
+  restart: unless-stopped
+  stop_grace_period: 25s
+  networks:
+    - database
+    - outbound
+  depends_on:
+    journal-db:
+      condition: service_healthy
+    journal-migrate:
+      condition: service_completed_successfully
+
+services:
+  journal-db:
+    image: postgres:17-alpine
+    environment: *database-env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - journal-db-data:/var/lib/postgresql/data
+    networks:
+      - database
+    restart: unless-stopped
+    logging: *logs
+
+  journal-migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    environment: *database-env
+    networks:
+      - database
+    depends_on:
+      journal-db:
+        condition: service_healthy
+
+  journal-bot:
+    <<: *worker
+    command: ["python", "-m", "app.main", "bot"]
+    environment:
+      <<: *app-env
+      BOT_TOKEN: "${BOT_TOKEN:?BOT_TOKEN is required}"
+
+  journal-sync:
+    <<: *worker
+    command: ["python", "-m", "app.main", "sync"]
+    environment:
+      <<: *app-env
+      JOURNAL_LOGIN: "${JOURNAL_LOGIN:-}"
+      JOURNAL_PASSWORD: "${JOURNAL_PASSWORD:-}"
+
+networks:
+  database:
+    internal: true
+  outbound: {}
+
+volumes:
+  journal-db-data:
